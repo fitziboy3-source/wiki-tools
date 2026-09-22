@@ -1,0 +1,10 @@
+README.md:10: link: "departments/finance.md" does not resolve to a file in the wiki
+departments/design.md:1: departments: page is not linked from the README department table
+departments/sales.md:5: term: "review" is already declared at CONTEXT.md:5
+departments/sales.md:8: alias: no target (expected "**Term** → owner/repo: path")
+departments/sales.md:12: restricted: matches restricted.txt line 3
+proposals/01M34QGKN0BXTHPQ5M4FYDS47K.md:1: proposal: header ID "01M34QHQS8WDXBVQXR0W8C9E1T" does not match the file name
+proposals/01M34QHQS8WDXBVQXR0W8C9E1T.md:3: proposal: item has no source (expected "(source: who, when, where)" at the end)
+proposals/01M34QHQS8WDXBVQXR0W8C9E1T.md:4: restricted: looks like a bearer token
+proposals/01M34QHQS8WDXBVQXR0W8C9E1T.md:5: proposal: unknown kind "person" (expected term, rule, skill, or fact)
+9 faults

@@ -1,0 +1,1 @@
+ok: 5 files, 2 declarations, 2 aliases, 2 proposal lines
