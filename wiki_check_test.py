@@ -123,11 +123,12 @@ class ReviewFindings(unittest.TestCase):
                               'README.md:7: departments: row "Design" links no page in departments/\n'
                               'README.md:10: link: "missing.md" does not resolve to a file in the wiki\n'
                               'README.md:11: link: "%00.md" does not resolve to a file in the wiki\n'
+                              'README.md:12: link: "[withheld]" does not resolve to a file in the wiki\n'
                               'README.md:12: restricted: looks like a password or key assignment\n'
                               'departments/sales.md:1: departments: page is not linked from the README department table\n'
                               'proposals/01M34QM0000000000000000EMP.md:1: proposal: first line must be the header "# 01M34QM0000000000000000EMP"\n'
                               'proposals/01M34QM0000000000000000SRC.md:2: proposal: source must name who, the date (YYYY-MM-DD), and where\n'
-                              '8 faults\n')
+                              '9 faults\n')
         self.assertEqual(code, 1)
 
     def test_the_valid_forms_found_in_review_pass(self):
@@ -146,6 +147,53 @@ class ReviewFindings(unittest.TestCase):
             })
             code, out, _ = run(root)
         self.assertEqual(out, "ok: 5 files, 1 declarations, 0 aliases, 1 proposal lines\n")
+        self.assertEqual(code, 0)
+
+
+class ReviewRound2(unittest.TestCase):
+    """The cases Codex's second review (of bbc8845) found, each with a hand-written expectation."""
+
+    def test_the_faults_found_in_round_2_are_reported_without_echoing_a_secret(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_wiki(tmp, {
+                "README.md": "| Department | Page |\n|---|---|\n| Sales | [sales][sales-page] |\n"
+                             "password=supersecret123\n| Phase | Page |\n|---|---|\n| Sales | [sales][sales-page] |\n\n"
+                             "[sales-page]: departments/sales.md\n[nested](docs/Leave_(US_(staff)).md)\n"
+                             "`` [missing](missing.md) `\n[missing link with a secret](missing.md?token=abc123def456ghi)\n",
+                "CONTEXT.md": "password: correcthorsebatterystaple\n",
+                "departments/sales.md": "# Sales\n",
+                "proposals/01M34QM0000000000000000R2A.md": "# 01M34QM0000000000000000R2A\n"
+                    "- [unknown] password=supersecret123\n- [rule] No author. (source: , 2026-09-22, Meeting, agenda)\n",
+            })
+            code, out, _ = run(root)
+        self.assertEqual(out, 'CONTEXT.md:1: restricted: looks like a password or key assignment\n'
+                              'README.md:4: restricted: looks like a password or key assignment\n'
+                              'README.md:10: link: "docs/Leave_(US_(staff)).md" does not resolve to a file in the wiki\n'
+                              'README.md:11: link: "missing.md" does not resolve to a file in the wiki\n'
+                              'README.md:12: link: "[withheld]" does not resolve to a file in the wiki\n'
+                              'README.md:12: restricted: looks like a password or key assignment\n'
+                              'proposals/01M34QM0000000000000000R2A.md:2: proposal: unknown kind "[withheld]" (expected term, rule, skill, or fact)\n'
+                              'proposals/01M34QM0000000000000000R2A.md:2: proposal: item has no source (expected "(source: who, when, where)" at the end)\n'
+                              'proposals/01M34QM0000000000000000R2A.md:2: restricted: looks like a password or key assignment\n'
+                              'proposals/01M34QM0000000000000000R2A.md:3: proposal: source must name who, the date (YYYY-MM-DD), and where\n'
+                              '10 faults\n')
+        self.assertNotIn("supersecret", out)
+        self.assertNotIn("abc123", out)
+        self.assertEqual(code, 1)
+
+    def test_the_valid_forms_found_in_round_2_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_wiki(tmp, {
+                "README.md": "| Department | Page |\n|---|---|\n| Sales | [sales][] |\n\n[sales]: departments/sales.md\n"
+                             "See [the leave page](docs/Leave_(US_(staff)).md), plain text](missing.md), "
+                             "[a bracket] with no link, and [![logo](docs/logo.md)](departments/sales.md).\n"
+                             "Password: required.\nToken: expiration is one hour.\n",
+                "departments/sales.md": "# Sales\n",
+                "docs/Leave_(US_(staff)).md": "# Leave\n",
+                "docs/logo.md": "# Logo\n",
+            })
+            code, out, _ = run(root)
+        self.assertEqual(out, "ok: 4 files, 0 declarations, 0 aliases, 0 proposal lines\n")
         self.assertEqual(code, 0)
 
 
