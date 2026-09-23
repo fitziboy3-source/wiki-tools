@@ -239,6 +239,26 @@ class ReviewRound3(unittest.TestCase):
         self.assertEqual(code, 0)
 
 
+class ReviewRound4(unittest.TestCase):
+    """The assignment-shape cases Codex's fourth review (of ac1b600) found."""
+
+    def test_passwords_with_punctuation_inside_are_caught(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, _ = run(make_wiki(tmp, {"notes.md": "password: Summer!2026\npassword: Tricky.Password9\n"}))
+        self.assertEqual(out, "notes.md:1: restricted: looks like a password or key assignment\n"
+                              "notes.md:2: restricted: looks like a password or key assignment\n2 faults\n")
+        self.assertEqual(code, 1)
+
+    def test_hyphenated_and_emphasized_policy_prose_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, _ = run(make_wiki(tmp, {"notes.md":
+                "Password: case-sensitive and must contain at least eight characters.\n"
+                "Token: single-use credentials expire after one hour.\n"
+                "Password: **required** for all staff.\n"}))
+        self.assertEqual(out, "ok: 1 files, 0 declarations, 0 aliases, 0 proposal lines\n")
+        self.assertEqual(code, 0)
+
+
 class Usage(unittest.TestCase):
     def test_no_root_two_roots_a_missing_root_and_a_file_all_exit_2(self):
         for args in ((), ("a", "b"), (os.path.join(FIXTURES, "no-such-wiki"),), (CHECKER,)):
