@@ -197,6 +197,48 @@ class ReviewRound2(unittest.TestCase):
         self.assertEqual(code, 0)
 
 
+class ReviewRound3(unittest.TestCase):
+    """The cases Codex's third review (of 7e26b2b) found, each with a hand-written expectation."""
+
+    def test_the_faults_found_in_round_3_are_reported_without_echoing_a_secret(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_wiki(tmp, {
+                "README.md": "[download][private]\n\n[private]: missing.md?token=syntheticsecret12345\n"
+                             "[Press `]`](missing.md)\n[Policy](missing.md\t\"Leave policy\")\n"
+                             "password: correcthorsebatterystaple # production\n**Password**: hunter2hunter2\n",
+                "proposals/01M34QM0000000000000000R3A.md": "# 01M34QM0000000000000000R3A\n"
+                    "- [fact] The password: correcthorsebatterystaple (source: Ashley, 2026-09-22, meeting)\n"
+                    "- [rule] Two empty author fields. (source: , , 2026-09-22, Meeting)\n"
+                    "- [rule] Empty where. (source: Ashley, 2026-09-22, , )\n",
+            })
+            code, out, _ = run(root)
+        self.assertEqual(out, 'README.md:1: link: "[withheld]" does not resolve to a file in the wiki\n'
+                              'README.md:3: link: "[withheld]" does not resolve to a file in the wiki\n'
+                              'README.md:3: restricted: looks like a password or key assignment\n'
+                              'README.md:4: link: "missing.md" does not resolve to a file in the wiki\n'
+                              'README.md:5: link: "missing.md" does not resolve to a file in the wiki\n'
+                              'README.md:6: restricted: looks like a password or key assignment\n'
+                              'README.md:7: restricted: looks like a password or key assignment\n'
+                              'proposals/01M34QM0000000000000000R3A.md:2: restricted: looks like a password or key assignment\n'
+                              'proposals/01M34QM0000000000000000R3A.md:3: proposal: source must name who, the date (YYYY-MM-DD), and where\n'
+                              'proposals/01M34QM0000000000000000R3A.md:4: proposal: source must name who, the date (YYYY-MM-DD), and where\n'
+                              '10 faults\n')
+        for secret in ("syntheticsecret", "correcthorse", "hunter2"):
+            self.assertNotIn(secret, out)
+        self.assertEqual(code, 1)
+
+    def test_the_valid_forms_found_in_round_3_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_wiki(tmp, {
+                "README.md": "[Policy](Leave.md\t\"Leave policy\") and [Press `]`](Leave.md).\n"
+                             "Password: Required for all staff.\nThe **Secret**: sauce is butter.\n",
+                "Leave.md": "# Leave\n",
+            })
+            code, out, _ = run(root)
+        self.assertEqual(out, "ok: 2 files, 0 declarations, 0 aliases, 0 proposal lines\n")
+        self.assertEqual(code, 0)
+
+
 class Usage(unittest.TestCase):
     def test_no_root_two_roots_a_missing_root_and_a_file_all_exit_2(self):
         for args in ((), ("a", "b"), (os.path.join(FIXTURES, "no-such-wiki"),), (CHECKER,)):

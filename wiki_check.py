@@ -49,12 +49,13 @@ SECRETS = [  # (fault message, pattern); always on, whatever restricted.txt says
     ("looks like an AWS access key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
     ("looks like a private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     ("looks like a bearer token", re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{16,}", re.IGNORECASE)),
-    # `name=value`; or `name: value` where the value is quoted, holds a digit, or is the line's
-    # last word without sentence punctuation. Prose such as "Password: required." passes.
+    # `name=value` or `name: value` with a value of 8 or more characters, except prose: a value
+    # that is a plain word (letters only, at most 15) followed by another word or by sentence
+    # punctuation, as in "Password: required." A passphrase with spaces reads as prose and passes.
     # TypeSafe publishes no key prefix, so its keys (TYPESAFE_API_KEY=...) are caught here.
     ("looks like a password or key assignment", re.compile(
-        r"(?:pass(?:word|wd)?|secret|token|api[_-]?key)[\"']?\s*(?:=\s*[\"']?[^\s\"'<>{}]{8,}|:\s*(?:"
-        r"[\"'][^\s\"']{8,}|(?=[^\s\"'<>{}]*\d)[^\s\"'<>{}]{8,}|[^\s\"'<>{}]{7,}[^\s\"'<>{}.,;:!?]\s*$))",
+        r"(?:pass(?:word|wd)?|secret|token|api[_-]?key)[\"'*]*\s*(?:=\s*[\"']?[^\s\"'<>{}]{8,}"
+        r"|:\s*(?![A-Za-z]{1,15}(?:[.,;:!?]|\s+[A-Za-z]))[\"']?[^\s\"'<>{}]{8,})",
         re.IGNORECASE)),
     ("looks like a connection string with credentials", re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@", re.IGNORECASE)),
 ]
@@ -165,10 +166,11 @@ def check_restricted(rel, lines, patterns, faults):
             faults.append((rel, number, "restricted", message))
 
 
-def quoted(text):
+def quoted(text, origin=None):
     """User text for a fault message. `report` prints it in double quotes, or as "[withheld]" when
-    its line has a restricted fault."""
-    return "\0" + text.replace("\0", "") + "\0"
+    the line it came from has a restricted fault: `origin`, a line number in the same file, or by
+    default the fault's own line."""
+    return f"\0{origin or ''}\1{text.replace(chr(0), '')}\0"
 
 
 def check_page(root, rel, lines, faults, counts):
@@ -177,10 +179,10 @@ def check_page(root, rel, lines, faults, counts):
     for number, line, example in lines:
         if example:
             continue
-        for target in links(line, references):
+        for target, origin in links(line, references):
             path = link_path(root, rel, target)
             if path is not None and not exists_inside(root, path):
-                faults.append((rel, number, "link", f"{quoted(target)} does not resolve to a file in the wiki"))
+                faults.append((rel, number, "link", f"{quoted(target, origin)} does not resolve to a file in the wiki"))
         alias = ALIAS.match(line)
         if alias:
             counts["aliases"] += 1
@@ -217,21 +219,22 @@ def check_proposal(rel, lines, faults, counts):
         if not source:
             faults.append((rel, number, "proposal", 'item has no source (expected "(source: who, when, where)" at the end)'))
             continue
-        parts = source.group(1).split(",")
+        parts = [part.strip() for part in source.group(1).split(",")]
         when = next((i for i, part in enumerate(parts) if i and DATE.fullmatch(part)), None)
-        if when is None or not ",".join(parts[:when]).strip() or not ",".join(parts[when + 1:]).strip():
+        if when is None or when == len(parts) - 1 or not all(parts):
             faults.append((rel, number, "proposal", "source must name who, the date (YYYY-MM-DD), and where"))
         if not text[:source.start()].strip():
             faults.append((rel, number, "proposal", "item has a source but no text"))
 
 
 def definitions(lines):
-    """A page's reference definitions, `[label]: destination`: normalized label -> destination."""
+    """A page's reference definitions, `[label]: destination`: normalized label -> (destination,
+    line number of the definition)."""
     found = {}
-    for _, line, example in lines:
+    for number, line, example in lines:
         definition = None if example else REFERENCE.match(line)
         if definition:
-            found.setdefault(label_key(definition.group(1)), definition.group(2).strip("<>"))
+            found.setdefault(label_key(definition.group(1)), (definition.group(2).strip("<>"), number))
     return found
 
 
@@ -240,31 +243,30 @@ def label_key(label):
 
 
 def links(line, references):
-    """The destination of every link on one line, in Markdown's single-line forms: inline
+    """(destination, origin) for every link on one line, in Markdown's single-line forms: inline
     `[text](destination "title")` with an <angle> destination or one with nested balanced
     parentheses; full `[text][label]`, collapsed `[label][]`, and shortcut `[label]` references
-    whose label the page defines; and a reference definition's own destination. Code spans
-    (matching backtick runs) and backslash escapes are skipped; a link inside link text, such as
-    an image inside a link, is found too."""
+    whose label the page defines; and a reference definition's own destination. Origin is the
+    line number of the definition a reference's destination came from, else None (this line).
+    Code spans and backslash escapes are skipped; a link inside link text, such as an image
+    inside a link, is found too."""
     definition = REFERENCE.match(line)
     if definition:
-        return [definition.group(2).strip("<>")]
+        return [(definition.group(2).strip("<>"), None)]
     found, i = [], 0
     while i < len(line):
         char = line[i]
         if char == "\\":
             i += 2
         elif char == "`":
-            run = BACKTICKS.match(line, i).group()
-            close = re.compile(f"(?<!`){run}(?!`)").search(line, i + len(run))
-            i = close.end() if close else i + len(run)
+            i = code_span_end(line, i)
         elif char == "[" and (end := closing_bracket(line, i)) is not None:
             text, i = line[i + 1:end], end + 1
             found += links(text, references)
             if line.startswith("(", i) and (inline := destination(line, i + 1)):
                 target, i = inline
                 if target:
-                    found.append(target)
+                    found.append((target, None))
                 continue
             label = text
             if line.startswith("[", i) and (close := line.find("]", i + 1)) != -1:
@@ -276,13 +278,26 @@ def links(line, references):
     return found
 
 
+def code_span_end(line, i):
+    """The index just past the code span that opens at the backtick run at i; when no run of the
+    same length closes it, the run is literal text and the index just past the run."""
+    run = BACKTICKS.match(line, i).group()
+    close = re.compile(f"(?<!`){run}(?!`)").search(line, i + len(run))
+    return close.end() if close else i + len(run)
+
+
 def closing_bracket(line, start):
-    """The index of the `]` that closes the `[` at start (nesting and escapes honoured), or None."""
+    """The index of the `]` that closes the `[` at start (nesting, escapes, and code spans
+    honoured), or None."""
     depth, i = 0, start
     while i < len(line):
         if line[i] == "\\":
-            i += 1
-        elif line[i] == "[":
+            i += 2
+            continue
+        if line[i] == "`":
+            i = code_span_end(line, i)
+            continue
+        if line[i] == "[":
             depth += 1
         elif line[i] == "]":
             depth -= 1
@@ -294,10 +309,9 @@ def closing_bracket(line, start):
 
 def destination(line, i):
     """(destination, index after the closing `)`) for an inline link whose `(` ends just before i,
-    or None. The destination is <angle text> or a run without spaces whose parentheses balance;
-    an optional "title", 'title', or (title) may follow."""
-    while i < len(line) and line[i] == " ":
-        i += 1
+    or None. The destination is <angle text> or a run without whitespace whose parentheses
+    balance; an optional "title", 'title', or (title) may follow."""
+    i = skip_blanks(line, i)
     if line.startswith("<", i):
         close = line.find(">", i)
         if close == -1:
@@ -316,16 +330,19 @@ def destination(line, i):
                 depth -= 1
             i += 1
         target = line[start:i]
-    while i < len(line) and line[i] == " ":
-        i += 1
+    i = skip_blanks(line, i)
     if i < len(line) and line[i] in "\"'(":
         close = line.find(")" if line[i] == "(" else line[i], i + 1)
         if close == -1:
             return None
-        i = close + 1
-        while i < len(line) and line[i] == " ":
-            i += 1
+        i = skip_blanks(line, close + 1)
     return (target, i + 1) if line.startswith(")", i) else None
+
+
+def skip_blanks(line, i):
+    while i < len(line) and line[i] in " \t":
+        i += 1
+    return i
 
 
 def link_path(root, rel, target):
@@ -371,7 +388,7 @@ def check_departments(root, pages, faults):
     readme = pages.get("README.md") or []
     folder, linked, references = (root / "departments").resolve(), set(), definitions(readme)
     for number, name, row in department_rows(readme):
-        row_pages = {path for path in (link_path(root, "README.md", t) for t in links(row, references))
+        row_pages = {path for path in (link_path(root, "README.md", t) for t, _ in links(row, references))
                      if path is not None and path.parent == folder}
         if not row_pages:
             faults.append(("README.md", number, "departments", f"row {quoted(name)} links no page in departments/"))
@@ -399,16 +416,18 @@ def check_terms(pages, faults, counts):
 
 
 def report(faults, file_count, counts):
-    """Print the faults sorted by path and line, with quoted user text withheld on restricted lines."""
+    """Print the faults sorted by path and line; quoted user text whose origin line has a
+    restricted fault prints as "[withheld]"."""
     if not faults:
         print(f"ok: {file_count} files, {counts['declarations']} declarations, {counts['aliases']} aliases, "
               f"{counts['proposal lines']} proposal lines")
         return 0
     restricted = {(path, line) for path, line, check, _ in faults if check == "restricted"}
     for path, line, check, message in sorted(faults, key=lambda f: (f[0], f[1], f[2])):
-        withheld = (path, line) in restricted
-        shown = re.sub("\0([^\0]*)\0", lambda m: '"[withheld]"' if withheld else f'"{m.group(1)}"', message)
-        print(f"{path}:{line}: {check}: {shown}")
+        def show(m):
+            origin = int(m.group(1)) if m.group(1) else line
+            return '"[withheld]"' if (path, origin) in restricted else f'"{m.group(2)}"'
+        print(f"{path}:{line}: {check}: " + re.sub("\0(\\d*)\1([^\0]*)\0", show, message))
     print(f"{len(faults)} fault{'' if len(faults) == 1 else 's'}")
     return 1
 
