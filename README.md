@@ -14,23 +14,23 @@ Run it from a wiki's root, on `.`, before you push. The output is one of:
 - **Faults:** one line per fault, `path:line: check: message`, sorted by path and line, then `<n> faults`. Exit 1. Every fault is listed, never only the first.
 - **Usage error or unreadable root:** a message on standard error. Exit 2.
 
-A restricted fault names the pattern that fired, never the text it matched, so a pasted key does not reach a CI log.
+A restricted fault names the pattern that fired, never the text it matched. A line that matches gets only that fault and is withheld from every other check, so no other message repeats its text either. Fix it and run again to see anything else on that line. A pasted key never reaches a CI log.
 
 ## What it checks
 
 | Check | A fault means |
 |---|---|
-| `link` | A relative Markdown link (with or without `#anchor`) does not name a file or folder inside the wiki. External links are skipped. This also catches a README department row whose page is missing. |
-| `departments` | A page in `departments/` is not linked from a row of the README's department table (a line starting with `\|`). |
+| `link` | A relative Markdown link (inline, `<angle-bracketed>`, or a reference definition `[name]: path`; with or without `#anchor`) does not name a file or folder inside the wiki. External links are skipped. This also catches a README department row whose page is missing. |
+| `departments` | A page in `departments/` is not linked from a row of the README's department table, or a row of that table links no page in `departments/`. The department table is the first table whose first header cell is `Department`; other tables, such as the workflow table, do not count. |
 | `term` | A term is declared a second time. A declaration is `**Term**:` at the start of a line. Identity is the term lowercased with its spaces normalized, across every Markdown file; `.git` is skipped. The fault names the first declaration. |
-| `alias` | An alias line has no target. An alias is `**Term** → owner/repo: path` (optional `#anchor`; `->` also accepted), then a one-line gloss. Alias lines never count as declarations, so a word declared once and aliased to another repo's different sense is allowed. |
-| `proposal` | A file in `proposals/` breaks the inbox format: the first non-blank line must be `# <ID>` with the ID equal to the file name; every later line must be `- [kind] text (source: who, when, where)` with a kind of `term`, `rule`, `skill`, or `fact`. |
+| `alias` | An alias line has no target. An alias is `**Term** → owner/repo: path` (optional `#anchor` after the path, never instead of it; `->` also accepted), then a one-line gloss. Alias lines never count as declarations, so a word declared once and aliased to another repo's different sense is allowed. |
+| `proposal` | A file in `proposals/` breaks the inbox format: the first non-blank line must be `# <ID>` with the ID equal to the file name (an empty file fails); every later line must be `- [kind] text (source: who, YYYY-MM-DD, where)` with a kind of `term`, `rule`, `skill`, or `fact`. The source runs to the line's last `)`, so it may hold parentheses of its own. |
 | `restricted` | A line in any Markdown file matches a built-in secret shape or a pattern in the wiki's `restricted.txt`. |
 | `read` | A file is not UTF-8 text. |
 
-Lines inside fenced code blocks are examples. Only the `restricted` check reads them, because a secret in a code block is still a secret.
+Fenced code blocks and inline code are examples. Only the `restricted` check reads them, because a secret in a code block is still a secret. A fence closes only on the same character, at least as long as it opened. Proposal files hold no examples: every line is checked.
 
-**Built-in secret shapes**, always on: OpenAI keys, GitHub tokens, AWS access keys, private-key blocks, bearer tokens, password or key assignments (`password: ...`, `API_KEY=...`), and connection strings with a user and password. TypeSafe publishes no key prefix, so a TypeSafe key is caught by the assignment shape (`TYPESAFE_API_KEY=...`).
+**Built-in secret shapes**, always on: OpenAI keys, GitHub tokens, AWS access keys, private-key blocks, bearer tokens, password or key assignments (`password: ...`, `API_KEY=...`), and connection strings with a user and password. An assignment is `name=value`, a quoted value, or `name: value` where the value holds a digit, so prose such as `Password: requirements are set by the owner.` passes. TypeSafe publishes no key prefix, so a TypeSafe key is caught by the assignment shape (`TYPESAFE_API_KEY=...`).
 
 **`restricted.txt`** at the wiki root: one case-insensitive Python regular expression per line; blank lines and `#` comments are ignored. A pattern that does not compile is itself a fault at its line. The file is optional.
 
@@ -48,6 +48,7 @@ That pin line is the single record of which version a wiki runs. To vendor or up
 
 ```bash
 SHA=$(git -C ~/Projects/wiki-tools rev-parse origin/main)
+mkdir -p scripts
 git -C ~/Projects/wiki-tools show "$SHA:wiki_check.py" \
   | awk -v pin="# vendored from fitziboy3-source/wiki-tools@$SHA; edit upstream, never here" 'NR==2{print pin} {print}' \
   > scripts/wiki_check.py
@@ -105,7 +106,8 @@ Standard library only. The test runs the checker the way a person does and compa
 
 - `fixtures/faults/` is a mini-wiki with nine seeded faults, one of each kind the spec names. Its `expected.txt` is the exact output, written by hand, never generated by the checker.
 - `fixtures/clean/` is a mini-wiki that must pass. It holds the allowed case (the word "Review" declared once and aliased to ATLAS's different sense), a valid proposal, a declaration example inside a code fence, an alias written with `->`, and one page with Windows line endings. Its `expected.txt` is the one-line count.
-- The clean fixture is also copied to a temporary folder with the checker at `scripts/wiki_check.py` and run on `.` under an empty home folder and an empty environment: the standalone-clone case.
+- The clean fixture is also copied to a temporary folder with the checker at `scripts/wiki_check.py` and run on `.` under an empty home folder, with nothing else in its environment: the standalone-clone case.
 - Edge cases: each built-in secret shape is caught without echoing the secret, a link outside the root fails, a symlinked page is never read, and usage errors exit 2.
+- Review findings: the faults and valid forms Codex's cross-review found (reference links, parentheses in paths, inline code, the department table, empty proposals, source parts, anchor-only aliases, nested fences, a NUL-byte link, prose that names a password), each with a hand-written expectation.
 
 To change a check, edit the fixture and its `expected.txt` by hand first, watch the test fail, then change `wiki_check.py`.

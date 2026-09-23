@@ -20,6 +20,17 @@ def run(*args, checker=CHECKER, cwd=None, env=None):
     return done.returncode, done.stdout, done.stderr
 
 
+def make_wiki(tmp, files):
+    """A wiki folder at tmp/wiki holding `files` (relative path -> text); returns its path."""
+    root = os.path.join(tmp, "wiki")
+    for rel, text in files.items():
+        path = os.path.join(root, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+    return root
+
+
 def expected(name):
     with open(os.path.join(FIXTURES, name, "expected.txt"), encoding="utf-8") as f:
         return f.read()
@@ -59,22 +70,13 @@ class Fixtures(unittest.TestCase):
 
 
 class Edges(unittest.TestCase):
-    def wiki(self, tmp, files):
-        root = os.path.join(tmp, "wiki")
-        for rel, text in files.items():
-            path = os.path.join(root, *rel.split("/"))
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(text)
-        return root
-
     def test_every_built_in_secret_shape_is_caught_and_never_echoed(self):
         # Assembled at run time so this public file never holds a literal key shape.
         secrets = ["sk-" + "a" * 24, "ghp_" + "A" * 36, "AKIA" + "ABCDEFGHIJKLMNOP",
                    "-----BEGIN " + "RSA PRIVATE KEY-----", "Authorization: Bearer " + "x" * 20,
                    "TYPESAFE_API_KEY=" + "q" * 24, "postgres://" + "admin:hunter22@db.example.com/jobs"]
         with tempfile.TemporaryDirectory() as tmp:
-            code, out, _ = run(self.wiki(tmp, {"notes.md": "".join(f"{s}\n" for s in secrets)}))
+            code, out, _ = run(make_wiki(tmp, {"notes.md": "".join(f"{s}\n" for s in secrets)}))
         self.assertEqual(out, "notes.md:1: restricted: looks like an OpenAI key\n"
                               "notes.md:2: restricted: looks like a GitHub token\n"
                               "notes.md:3: restricted: looks like an AWS access key\n"
@@ -87,7 +89,7 @@ class Edges(unittest.TestCase):
 
     def test_nothing_outside_the_root_is_read_or_accepted(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = self.wiki(tmp, {"README.md": "[outside](../outside.md)\n"})
+            root = make_wiki(tmp, {"README.md": "[outside](../outside.md)\n"})
             with open(os.path.join(tmp, "outside.md"), "w", encoding="utf-8") as f:
                 f.write("password: " + "hunter2" * 3 + "\n**Review**:\n")
             try:
@@ -97,6 +99,54 @@ class Edges(unittest.TestCase):
             code, out, _ = run(root)
         self.assertEqual(out, 'README.md:1: link: "../outside.md" does not resolve to a file in the wiki\n1 fault\n')
         self.assertEqual(code, 1)
+
+
+class ReviewFindings(unittest.TestCase):
+    """The cases Codex's cross-review of 26996b4 found, each with a hand-written expectation."""
+
+    def test_the_faults_found_in_review_are_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_wiki(tmp, {
+                "README.md": "| Phase | Page |\n|---|---|\n| Sales | [sales](departments/sales.md) |\n\n"
+                             "| Department | Page |\n|---|---|\n| Design | none yet |\n"
+                             "| Finance | [finance](departments/finance.md) |\n\n"
+                             "[policy]: missing.md\n[bad](%00.md) is checked and the run goes on.\n"
+                             "[secret link](missing.md?token=abc123def456ghi)\n",
+                "CONTEXT.md": "**Review** → owner/repo: #review\nAn anchor alone is not a path.\n",
+                "departments/sales.md": "# Sales\n",
+                "departments/finance.md": "# Finance\n",
+                "proposals/01M34QM0000000000000000EMP.md": "",
+                "proposals/01M34QM0000000000000000SRC.md": "# 01M34QM0000000000000000SRC\n- [rule] Something. (source: A)\n",
+            })
+            code, out, _ = run(root)
+        self.assertEqual(out, 'CONTEXT.md:1: alias: no target (expected "**Term** → owner/repo: path")\n'
+                              'README.md:7: departments: row "Design" links no page in departments/\n'
+                              'README.md:10: link: "missing.md" does not resolve to a file in the wiki\n'
+                              'README.md:11: link: "%00.md" does not resolve to a file in the wiki\n'
+                              'README.md:12: restricted: looks like a password or key assignment\n'
+                              'departments/sales.md:1: departments: page is not linked from the README department table\n'
+                              'proposals/01M34QM0000000000000000EMP.md:1: proposal: first line must be the header "# 01M34QM0000000000000000EMP"\n'
+                              'proposals/01M34QM0000000000000000SRC.md:2: proposal: source must name who, the date (YYYY-MM-DD), and where\n'
+                              '8 faults\n')
+        self.assertEqual(code, 1)
+
+    def test_the_valid_forms_found_in_review_pass(self):
+        fence = "````markdown\n```\n**Sales**:\n```\n````\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_wiki(tmp, {
+                "README.md": "| Department | Page |\n|---|---|\n| Sales | [sales](departments/sales.md) |\n\n"
+                             "See [the policy](<Leave policy (US).md>), [leave](Leave_(US).md), "
+                             "and `[not a link](nowhere.md)`.\n\n[policy]: Leave_(US).md\n",
+                "Leave policy (US).md": "# Leave\n",
+                "Leave_(US).md": "# Leave\n",
+                "departments/sales.md": "**Sales**:\nDeclared once.\n\nPassword: requirements are set by the owner.\n"
+                                        "Token: expiration is one hour.\n\n" + fence,
+                "proposals/01M34QM0000000000000000NST.md": "# 01M34QM0000000000000000NST\n\n"
+                    "- [rule] Leave requests go to the owner. (source: Ashley Sheaffer, 2026-09-22, Meeting (notes))\n",
+            })
+            code, out, _ = run(root)
+        self.assertEqual(out, "ok: 5 files, 1 declarations, 0 aliases, 1 proposal lines\n")
+        self.assertEqual(code, 0)
 
 
 class Usage(unittest.TestCase):

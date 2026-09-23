@@ -10,18 +10,21 @@ Usage: python3 wiki_check.py <wiki-root>
 
 Prints one fault per line, `path:line: check: message`, sorted by path and line, then `<n> faults`,
 and exits 1. A clean wiki prints one line counting files, declarations, aliases, and proposal
-lines, and exits 0. Usage errors and an unreadable root exit 2. Reads nothing outside the root,
-follows no symlinks, and never prints the text a restricted pattern matched.
+lines, and exits 0. Usage errors and an unreadable root exit 2. Reads nothing outside the root
+and follows no links out of it. A line that matches a restricted pattern gets that one fault and
+is withheld from every other check, so no message ever repeats its text.
 
 The wiki's shape, which this file is the one reader of:
-  README.md            the department table: lines starting with `|` that link departments/*.md
+  README.md            the department table: the table whose first header cell is "Department";
+                       each row links its page in departments/
   departments/*.md     one page per department
-  proposals/<ID>.md    first non-blank line `# <ID> ...`; every later line `- [kind] text (source: ...)`
+  proposals/<ID>.md    first non-blank line `# <ID> ...`; every later line
+                       `- [kind] text (source: who, YYYY-MM-DD, where)`
   restricted.txt       one case-insensitive regular expression per line; `#` comments
 A declaration is `**Term**:` at the start of a line; an alias is `**Term** → owner/repo: path`
-(`->` also accepted). Lines inside fenced code blocks are examples: only the restricted check
-reads them. The README-to-page direction is the link check; the page-to-README direction is the
-departments check.
+(`->` also accepted). Lines in fenced code blocks, and inline code, are examples: only the
+restricted check reads them. A department row whose page is missing is a dead link, reported by
+the link check.
 """
 import os
 import re
@@ -30,23 +33,31 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import unquote
 
 KINDS = ("term", "rule", "skill", "fact")
-FENCE = re.compile(r"^\s{0,3}(```|~~~)")
-LINK = re.compile(r"\[[^\]]*\]\(\s*<?([^)>\s]+)>?(?:\s+\"[^\"]*\")?\s*\)")
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+CODE_SPAN = re.compile(r"(`+).+?\1")
+DESTINATION = r"(<[^<>\n]*>|(?:[^\s()]|\([^\s()]*\))+)"  # <any text> or a path with balanced ( )
+INLINE_LINK = re.compile(r"\]\(\s*" + DESTINATION + r"(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^()]*\)))?\s*\)")
+REFERENCE = re.compile(r"^ {0,3}\[[^\]]+\]:\s*" + DESTINATION)
 SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 ALIAS = re.compile(r"^\*\*([^*]+)\*\*\s*(?:→|->)(.*)$")
-ALIAS_TARGET = re.compile(r"^\s*[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\s*:\s*\S")
+ALIAS_TARGET = re.compile(r"^\s*[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\s*:\s*[^\s#]")
 DECLARATION = re.compile(r"^\*\*([^*]+)\*\*\s*:")
 ITEM = re.compile(r"^\s*[-*]\s+\[([^\]]*)\]\s*(.*)$")
-SOURCE = re.compile(r"\(\s*source\s*:[^)]*[^\s)][^)]*\)\s*$", re.IGNORECASE)
+SOURCE = re.compile(r"\(\s*source\s*:(.*)\)\s*$", re.IGNORECASE)  # greedy: to the line's last ")"
+DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 SECRETS = [  # (fault message, pattern); always on, whatever restricted.txt says
     ("looks like an OpenAI key", re.compile(r"\bsk-[A-Za-z0-9_-]{20,}")),
     ("looks like a GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")),
     ("looks like an AWS access key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
     ("looks like a private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     ("looks like a bearer token", re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{16,}", re.IGNORECASE)),
-    # TypeSafe publishes no key prefix, so its keys (TYPESAFE_API_KEY=...) are caught here.
+    # `name=value`, a quoted value, or a `name: value` holding a digit; prose such as
+    # "Password: requirements are..." passes. TypeSafe publishes no key prefix, so its keys
+    # (TYPESAFE_API_KEY=...) are caught here.
     ("looks like a password or key assignment", re.compile(
-        r"(?:pass(?:word|wd)?|secret|token|api[_-]?key)[\"']?\s*[:=]\s*[\"']?[^\s\"'<>{}]{8,}", re.IGNORECASE)),
+        r"(?:pass(?:word|wd)?|secret|token|api[_-]?key)[\"']?\s*"
+        r"(?:=\s*[\"']?[^\s\"'<>{}]{8,}|:\s*(?:[\"'][^\s\"']{8,}|(?=[^\s\"'<>{}]*\d)[^\s\"'<>{}]{8,}))",
+        re.IGNORECASE)),
     ("looks like a connection string with credentials", re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@", re.IGNORECASE)),
 ]
 
@@ -67,8 +78,11 @@ def main(argv):
     for rel, lines in pages.items():
         if lines is None:
             faults.append((rel, 1, "read", "cannot read the file as UTF-8 text"))
-            continue
-        check_page(root, rel, lines, patterns, faults, counts)
+        else:
+            pages[rel] = withhold_restricted(rel, lines, patterns, faults)
+    for rel, lines in pages.items():
+        if lines is not None:
+            check_page(root, rel, lines, faults, counts)
     check_departments(root, pages, faults)
     check_terms(pages, faults, counts)
     return report(sorted(faults, key=lambda f: (f[0], f[1], f[2])), len(pages), counts)
@@ -80,15 +94,15 @@ def usage(why):
 
 
 def read_pages(root):
-    """Every Markdown file under root, `.git` and symlinks skipped: relative posix path -> a list of
-    (line number, text, is_example), where an example is a line inside or on a code fence; None
-    when the file is not UTF-8 text."""
+    """Every Markdown file under root, `.git` and anything linked in from elsewhere skipped:
+    relative posix path -> a list of (line number, text, is_example), where an example is a line
+    of a fenced code block, fences included; None when the file is not UTF-8 text."""
     pages = {}
     for folder, dirs, files in os.walk(root, onerror=raise_error):
-        dirs[:] = sorted(d for d in dirs if d != ".git" and not os.path.islink(os.path.join(folder, d)))
+        dirs[:] = sorted(d for d in dirs if d != ".git" and is_own(root, Path(folder, d)))
         for name in sorted(files):
             path = Path(folder, name)
-            if path.suffix.lower() != ".md" or path.is_symlink():
+            if path.suffix.lower() != ".md" or not is_own(root, path):
                 continue
             rel = path.relative_to(root).as_posix()
             try:
@@ -96,13 +110,28 @@ def read_pages(root):
             except (UnicodeDecodeError, OSError):
                 pages[rel] = None
                 continue
-            lines, fenced = [], False
+            lines, fence = [], None
             for number, line in enumerate(text.splitlines(), 1):
-                fence = bool(FENCE.match(line))
-                lines.append((number, line, fenced or fence))
-                fenced ^= fence
+                marker = FENCE.match(line)
+                if fence is None and marker:
+                    fence = marker.group(1)
+                elif fence and marker and marker.group(1)[0] == fence[0] \
+                        and len(marker.group(1)) >= len(fence) and not marker.group(2).strip():
+                    lines.append((number, line, True))
+                    fence = None
+                    continue
+                lines.append((number, line, fence is not None))
             pages[rel] = lines
     return dict(sorted(pages.items()))
+
+
+def is_own(root, path):
+    """True for a real file or folder of the wiki: not a symlink, and (which also catches Windows
+    junctions) still inside the root once resolved."""
+    try:
+        return not path.is_symlink() and path.resolve().is_relative_to(root)
+    except (ValueError, OSError):
+        return False
 
 
 def raise_error(error):
@@ -113,7 +142,7 @@ def read_restricted(root, faults):
     """(fault message, compiled pattern) for each line of restricted.txt; a pattern that does
     not compile is a fault at its line."""
     patterns, path = [], root / "restricted.txt"
-    if not path.is_file() or path.is_symlink():
+    if not path.is_file() or not is_own(root, path):
         return patterns
     try:
         lines = path.read_text(encoding="utf-8-sig").splitlines()
@@ -131,19 +160,27 @@ def read_restricted(root, faults):
     return patterns
 
 
-def check_page(root, rel, lines, patterns, faults, counts):
-    """Restricted patterns on every line; links and aliases outside examples; the inbox format for
-    a file in proposals/."""
+def withhold_restricted(rel, lines, patterns, faults):
+    """One restricted fault for each line that matches a secret shape or a restricted.txt
+    pattern, examples included; returns the other lines, the only ones later checks see."""
+    kept = []
     for number, line, example in lines:
-        for message, pattern in SECRETS + patterns:
-            if pattern.search(line):  # one restricted fault per line; the line needs fixing either way
-                faults.append((rel, number, "restricted", message))
-                break
+        message = next((message for message, pattern in SECRETS + patterns if pattern.search(line)), None)
+        if message:
+            faults.append((rel, number, "restricted", message))
+        else:
+            kept.append((number, line, example))
+    return kept
+
+
+def check_page(root, rel, lines, faults, counts):
+    """Links and aliases outside examples; the inbox format for a file in proposals/."""
+    for number, line, example in lines:
         if example:
             continue
-        for target in LINK.findall(line):
+        for target in links(line):
             path = link_path(root, rel, target)
-            if path is not None and not (path.is_relative_to(root) and path.exists()):
+            if path is not None and not exists_inside(root, path):
                 faults.append((rel, number, "link", f'"{target}" does not resolve to a file in the wiki'))
         alias = ALIAS.match(line)
         if alias:
@@ -156,12 +193,14 @@ def check_page(root, rel, lines, patterns, faults, counts):
 
 def check_proposal(rel, lines, faults, counts):
     """The first non-blank line is `# <ID>` with the ID equal to the file name; every later line is
-    `- [kind] text (source: ...)`."""
-    body = [(number, line) for number, line, example in lines if line.strip() and not example]
+    `- [kind] text (source: who, YYYY-MM-DD, where)`. A proposal holds no examples: every line counts."""
+    stem = PurePosixPath(rel).stem
+    body = [(number, line) for number, line, _ in lines if line.strip()]
     if not body:
+        faults.append((rel, 1, "proposal", f'first line must be the header "# {stem}"'))
         return
     (number, header), items = body[0], body[1:]
-    stem, words = PurePosixPath(rel).stem, header.lstrip("#").split()
+    words = header.lstrip("#").split()
     if not header.startswith("#") or not words:
         faults.append((rel, number, "proposal", f'first line must be the header "# {stem}"'))
     elif words[0] != stem:
@@ -175,10 +214,26 @@ def check_proposal(rel, lines, faults, counts):
         kind, text = item.group(1).strip(), item.group(2)
         if kind not in KINDS:
             faults.append((rel, number, "proposal", f'unknown kind "{kind}" (expected term, rule, skill, or fact)'))
-        if not SOURCE.search(text):
+        source = SOURCE.search(text)
+        if not source:
             faults.append((rel, number, "proposal", 'item has no source (expected "(source: who, when, where)" at the end)'))
-        elif not SOURCE.sub("", text).strip():
+            continue
+        parts = [part.strip() for part in source.group(1).split(",") if part.strip()]
+        if len(parts) < 3 or not any(DATE.fullmatch(part) for part in parts):
+            faults.append((rel, number, "proposal", "source must name who, the date (YYYY-MM-DD), and where"))
+        if not text[:source.start()].strip():
             faults.append((rel, number, "proposal", "item has a source but no text"))
+
+
+def links(line):
+    """The destination of every inline link and reference definition on a line, inline code
+    skipped."""
+    prose = CODE_SPAN.sub(" ", line)
+    targets = INLINE_LINK.findall(prose)
+    reference = REFERENCE.match(prose)
+    if reference:
+        targets.append(reference.group(1))
+    return [t[1:-1] if t.startswith("<") else t for t in targets]
 
 
 def link_path(root, rel, target):
@@ -187,16 +242,47 @@ def link_path(root, rel, target):
     if SCHEME.match(target) or target.startswith(("#", "//")):
         return None
     path = unquote(re.split(r"[#?]", target, maxsplit=1)[0])
-    base = root if path.startswith("/") else (root / rel).parent
-    return (base / path.lstrip("/")).resolve()
+    full = (root if path.startswith("/") else (root / rel).parent) / path.lstrip("/")
+    try:
+        return full.resolve()
+    except (ValueError, OSError):
+        return full  # an impossible path, such as one holding a NUL byte; it will not exist
+
+
+def exists_inside(root, path):
+    try:
+        return path.is_relative_to(root) and path.exists()
+    except (ValueError, OSError):
+        return False
+
+
+def department_rows(lines):
+    """(line number, first cell, row) for each row of the first README table whose first header
+    cell is "Department"."""
+    rows, state = [], "seek"
+    for number, line, example in lines:
+        is_row = not example and line.lstrip().startswith("|")
+        cells = [cell.strip().strip("*").strip() for cell in line.strip().strip("|").split("|")]
+        if state == "seek":
+            state = "separator" if is_row and cells[0].lower() == "department" else "seek"
+        elif state == "separator":
+            state = "rows"
+        elif is_row:
+            rows.append((number, cells[0], line))
+        else:
+            break
+    return rows
 
 
 def check_departments(root, pages, faults):
-    """Every page in departments/ is linked from a README table row. (A row whose page is missing
-    is a dead link, which the link check reports.)"""
-    linked = {link_path(root, "README.md", target)
-              for _, line, example in pages.get("README.md") or [] if not example and line.lstrip().startswith("|")
-              for target in LINK.findall(line)}
+    """Each department row links a page in departments/, and each page there is linked from a row."""
+    folder, linked = (root / "departments").resolve(), set()
+    for number, name, row in department_rows(pages.get("README.md") or []):
+        row_pages = {path for path in (link_path(root, "README.md", t) for t in links(row))
+                     if path is not None and path.parent == folder}
+        if not row_pages:
+            faults.append(("README.md", number, "departments", f'row "{name}" links no page in departments/'))
+        linked |= row_pages
     for rel in pages:
         if PurePosixPath(rel).parent.as_posix() == "departments" and (root / rel).resolve() not in linked:
             faults.append((rel, 1, "departments", "page is not linked from the README department table"))
