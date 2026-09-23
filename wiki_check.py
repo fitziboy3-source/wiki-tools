@@ -49,15 +49,13 @@ SECRETS = [  # (fault message, pattern); always on, whatever restricted.txt says
     ("looks like an AWS access key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
     ("looks like a private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     ("looks like a bearer token", re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{16,}", re.IGNORECASE)),
-    # `name=value` or `name: value` with a value of 8 or more characters, except prose: a value
-    # that is a plain word (letters and hyphens, at most 15, optionally in * or _ emphasis)
-    # followed by another word, or by sentence punctuation that ends the word, as in
-    # "Password: required." or "Token: single-use credentials". "Summer!2026" is not prose.
-    # A passphrase with spaces reads as prose and passes. TypeSafe publishes no key prefix, so
-    # its keys (TYPESAFE_API_KEY=...) are caught here.
+    # `name=value` or `name: value` with a value of 8 or more characters, prose included: no rule
+    # tells "Password: required." from "Password: Summer_!" reliably (four review rounds tried),
+    # so prose is reworded instead ("Password rules: ...", "Passwords are ..."). Known limit: a
+    # passphrase whose first word is under 8 characters is not caught. TypeSafe publishes no key
+    # prefix, so its keys (TYPESAFE_API_KEY=...) are caught here.
     ("looks like a password or key assignment", re.compile(
-        r"(?:pass(?:word|wd)?|secret|token|api[_-]?key)[\"'*]*\s*(?:=\s*[\"']?[^\s\"'<>{}]{8,}"
-        r"|:\s*(?![*_]*[A-Za-z][A-Za-z-]{0,14}[*_]*(?:[.,;:!?](?=\s|$)|\s+[*_]*[A-Za-z]))[\"']?[^\s\"'<>{}]{8,})",
+        r"(?:pass(?:word|wd)?|secret|token|api[_-]?key)[\"'*]*\s*[:=]\s*[\"']?[^\s\"'<>{}]{8,}",
         re.IGNORECASE)),
     ("looks like a connection string with credentials", re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@", re.IGNORECASE)),
 ]

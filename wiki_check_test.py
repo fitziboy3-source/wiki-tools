@@ -140,8 +140,8 @@ class ReviewFindings(unittest.TestCase):
                              "and `[not a link](nowhere.md)`.\n\n[policy]: Leave_(US).md\n",
                 "Leave policy (US).md": "# Leave\n",
                 "Leave_(US).md": "# Leave\n",
-                "departments/sales.md": "**Sales**:\nDeclared once.\n\nPassword: requirements are set by the owner.\n"
-                                        "Token: expiration is one hour.\n\n" + fence,
+                "departments/sales.md": "**Sales**:\nDeclared once.\n\nPassword rules: set by the owner.\n"
+                                        "Tokens expire after one hour.\n\n" + fence,
                 "proposals/01M34QM0000000000000000NST.md": "# 01M34QM0000000000000000NST\n\n"
                     "- [rule] Leave requests go to the owner. (source: Ashley Sheaffer, 2026-09-22, Meeting (notes))\n",
             })
@@ -187,7 +187,7 @@ class ReviewRound2(unittest.TestCase):
                 "README.md": "| Department | Page |\n|---|---|\n| Sales | [sales][] |\n\n[sales]: departments/sales.md\n"
                              "See [the leave page](docs/Leave_(US_(staff)).md), plain text](missing.md), "
                              "[a bracket] with no link, and [![logo](docs/logo.md)](departments/sales.md).\n"
-                             "Password: required.\nToken: expiration is one hour.\n",
+                             "Passwords are required.\nToken lifetime: one hour.\n",
                 "departments/sales.md": "# Sales\n",
                 "docs/Leave_(US_(staff)).md": "# Leave\n",
                 "docs/logo.md": "# Logo\n",
@@ -231,7 +231,7 @@ class ReviewRound3(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = make_wiki(tmp, {
                 "README.md": "[Policy](Leave.md\t\"Leave policy\") and [Press `]`](Leave.md).\n"
-                             "Password: Required for all staff.\nThe **Secret**: sauce is butter.\n",
+                             "Password rules: Required for all staff.\nThe **Secret** sauce is butter.\n",
                 "Leave.md": "# Leave\n",
             })
             code, out, _ = run(root)
@@ -240,21 +240,23 @@ class ReviewRound3(unittest.TestCase):
 
 
 class ReviewRound4(unittest.TestCase):
-    """The assignment-shape cases Codex's fourth review (of ac1b600) found."""
+    """The assignment shape after Codex's fourth and fifth reviews: every `name: value` or
+    `name=value` of 8 or more characters is a secret, prose included; prose is reworded."""
 
-    def test_passwords_with_punctuation_inside_are_caught(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            code, out, _ = run(make_wiki(tmp, {"notes.md": "password: Summer!2026\npassword: Tricky.Password9\n"}))
-        self.assertEqual(out, "notes.md:1: restricted: looks like a password or key assignment\n"
-                              "notes.md:2: restricted: looks like a password or key assignment\n2 faults\n")
-        self.assertEqual(code, 1)
-
-    def test_hyphenated_and_emphasized_policy_prose_passes(self):
+    def test_every_colon_or_equals_value_of_8_or_more_is_caught_prose_included(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, out, _ = run(make_wiki(tmp, {"notes.md":
-                "Password: case-sensitive and must contain at least eight characters.\n"
-                "Token: single-use credentials expire after one hour.\n"
-                "Password: **required** for all staff.\n"}))
+                "password: Summer!2026\npassword: Tricky.Password9\npassword: Summer_!\npassword: Summer**!\n"
+                "Password: case-sensitive and must contain at least eight characters.\n"}))
+        self.assertEqual(out, "".join(f"notes.md:{n}: restricted: looks like a password or key assignment\n"
+                                      for n in range(1, 6)) + "5 faults\n")
+        self.assertEqual(code, 1)
+
+    def test_policy_prose_worded_without_name_colon_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, _ = run(make_wiki(tmp, {"notes.md":
+                "Password rules: case-sensitive, at least eight characters.\n"
+                "Tokens are single-use and expire after one hour.\n(Passwords: see the owner.)\n"}))
         self.assertEqual(out, "ok: 1 files, 0 declarations, 0 aliases, 0 proposal lines\n")
         self.assertEqual(code, 0)
 
